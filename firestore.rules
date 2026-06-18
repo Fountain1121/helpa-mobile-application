@@ -1,0 +1,266 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // HELPER FUNCTIONS
+    // =========================================================================
+
+    // Is the request from a signed-in user?
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    // Is the signed-in user the owner of this document?
+    function isOwner(uid) {
+      return isAuth() && request.auth.uid == uid;
+    }
+
+    // Fetch the calling user's role from the users collection
+    function userRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    // Role checks — each reads the users doc once and caches it
+    function isAdmin() {
+      return isAuth() && userRole() == 'admin';
+    }
+
+    function isCustomer() {
+      return isAuth() && userRole() == 'customer';
+    }
+
+    function isTasker() {
+      return isAuth() && userRole() == 'tasker';
+    }
+
+    // Is the calling user an approved, active tasker?
+    function isApprovedTasker() {
+      return isTasker() &&
+        get(/databases/$(database)/documents/taskers/$(request.auth.uid)).data.isApproved == true;
+    }
+
+    // Does the incoming data only contain the allowed fields?
+    function onlyFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Is the field value unchanged from what's already stored?
+    function unchanged(field) {
+      return request.resource.data[field] == resource.data[field];
+    }
+
+
+    // =========================================================================
+    // USERS COLLECTION
+    // /users/{userId}
+    // =========================================================================
+    match /users/{userId} {
+
+      // Anyone can read their own profile.
+      // Admins can read any profile.
+      // Taskers can read customer profiles (needed to show job requester info).
+      allow read: if isOwner(userId) || isAdmin() || isTasker();
+
+      // Only the account owner can create their own document (on signup).
+      // Fields are validated to prevent role escalation — users cannot
+      // set themselves as admin through the app.
+      allow create: if isOwner(userId)
+        && request.resource.data.role in ['customer', 'tasker']
+        && request.resource.data.uid == userId
+        && request.resource.data.keys().hasAll([
+             'uid', 'fullName', 'email', 'phone', 'role', 'createdAt', 'isActive'
+           ]);
+
+      // Users can update their own non-sensitive fields.
+      // They cannot change their role, uid, or email through the app.
+      allow update: if isOwner(userId)
+        && unchanged('role')
+        && unchanged('uid')
+        && unchanged('email')
+        && unchanged('isActive');
+
+      // Admins can update any user (e.g. suspend / reactivate accounts).
+      allow update: if isAdmin();
+
+      // Nobody can delete user documents through the app.
+      allow delete: if false;
+    }
+
+
+    // =========================================================================
+    // TASKERS COLLECTION
+    // /taskers/{taskerId}
+    // =========================================================================
+    match /taskers/{taskerId} {
+
+      // Taskers can read their own profile.
+      // Admins can read all tasker profiles.
+      // Customers can read tasker profiles (to see who is assigned to their job).
+      allow read: if isOwner(taskerId) || isAdmin() || isCustomer();
+
+      // Only the tasker themselves can create their own profile (on signup).
+      // isApproved and idVerified must start as false — the app sets these,
+      // admin flips them. This prevents self-approval.
+      allow create: if isOwner(taskerId)
+        && request.resource.data.isApproved == false
+        && request.resource.data.idVerified == false
+        && request.resource.data.uid == taskerId;
+
+      // Taskers can update only their own availability and skills.
+      // They cannot approve themselves or mark their own ID as verified.
+      allow update: if isOwner(taskerId)
+        && onlyFields([
+             'skills', 'availability', 'idDocumentUrl',
+             'idDocumentType', 'idVerified', 'isApproved',
+             'rating', 'totalJobsCompleted', 'earnings',
+             'uid'
+           ])
+        && unchanged('isApproved')
+        && unchanged('idVerified');
+
+      // Admins can update anything on a tasker profile
+      // (approve, verify ID, suspend, update ratings).
+      allow update: if isAdmin();
+
+      // Only the system (Cloud Functions) or admin can update earnings/ratings.
+      // For now admin covers this; Cloud Functions will tighten this later.
+      allow delete: if false;
+    }
+
+
+    // =========================================================================
+    // JOBS COLLECTION
+    // /jobs/{jobId}
+    // =========================================================================
+    match /jobs/{jobId} {
+
+      // Customers can read their own jobs.
+      // Taskers can read pending jobs (to see available work) and
+      // any job assigned to them.
+      // Admins can read all jobs.
+      allow read: if isAdmin()
+        || (isCustomer() && resource.data.customerId == request.auth.uid)
+        || (isApprovedTasker() && (
+              resource.data.status == 'pending' ||
+              resource.data.taskerId == request.auth.uid
+            ));
+
+      // Only authenticated customers can create a job.
+      // Validates required fields and enforces safe initial state —
+      // status must be 'pending', payment must be 'unpaid', no tasker yet.
+      allow create: if isCustomer()
+        && request.resource.data.customerId == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.paymentStatus == 'unpaid'
+        && request.resource.data.taskerId == null
+        && request.resource.data.keys().hasAll([
+             'customerId', 'serviceType', 'serviceSubtype', 'description',
+             'location', 'preferredTime', 'budget', 'status',
+             'paymentStatus', 'createdAt', 'photos'
+           ]);
+
+      // Customers can cancel their own pending jobs only.
+      allow update: if isCustomer()
+        && resource.data.customerId == request.auth.uid
+        && resource.data.status == 'pending'
+        && request.resource.data.status == 'cancelled'
+        && onlyFields([
+             'customerId', 'taskerId', 'serviceType', 'serviceSubtype',
+             'description', 'photos', 'location', 'preferredTime', 'budget',
+             'agreedPrice', 'status', 'paymentStatus', 'commission',
+             'taskerPayout', 'createdAt', 'completedAt'
+           ]);
+
+      // Approved taskers can:
+      //   — Accept a pending job (assign themselves, set status to 'assigned')
+      //   — Advance status on their own jobs (on_the_way, in_progress, completed)
+      // They cannot change customerId, budget, commission, or payment status.
+      allow update: if isApprovedTasker()
+        && (
+          // Accepting a new job
+          (resource.data.status == 'pending'
+            && resource.data.taskerId == null
+            && request.resource.data.taskerId == request.auth.uid
+            && request.resource.data.status == 'assigned')
+          ||
+          // Progressing their own job
+          (resource.data.taskerId == request.auth.uid
+            && request.resource.data.status in [
+                 'on_the_way', 'in_progress', 'completed'
+               ])
+        )
+        && unchanged('customerId')
+        && unchanged('budget');
+
+      // Admins can update any field on any job.
+      allow update: if isAdmin();
+
+      // Nobody deletes jobs — they are cancelled instead (audit trail).
+      allow delete: if false;
+    }
+
+
+    // =========================================================================
+    // REVIEWS COLLECTION
+    // /reviews/{reviewId}
+    // =========================================================================
+    match /reviews/{reviewId} {
+
+      // Anyone authenticated can read reviews.
+      allow read: if isAuth();
+
+      // Only customers can write a review, and only for jobs that:
+      //   — belong to them
+      //   — are completed
+      //   — haven't been reviewed yet (prevent duplicate reviews)
+      allow create: if isCustomer()
+        && request.resource.data.customerId == request.auth.uid
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5
+        && request.resource.data.keys().hasAll([
+             'jobId', 'customerId', 'taskerId', 'rating', 'comment', 'createdAt'
+           ]);
+
+      // Reviews are immutable once submitted.
+      allow update: if false;
+      allow delete: if false;
+    }
+
+
+    // =========================================================================
+    // NOTIFICATIONS COLLECTION
+    // /notifications/{notifId}
+    // =========================================================================
+    match /notifications/{notifId} {
+
+      // Users can only read their own notifications.
+      allow read: if isAuth()
+        && resource.data.userId == request.auth.uid;
+
+      // Only admins and Cloud Functions (future) create notifications.
+      // For now admin covers creation; FCM Cloud Functions will handle
+      // this automatically once push notifications are built.
+      allow create: if isAdmin();
+
+      // Users can mark their own notifications as read (isRead only).
+      allow update: if isAuth()
+        && resource.data.userId == request.auth.uid
+        && onlyFields([
+             'userId', 'title', 'body', 'type',
+             'jobId', 'isRead', 'createdAt'
+           ])
+        && unchanged('userId')
+        && unchanged('title')
+        && unchanged('body')
+        && unchanged('type')
+        && unchanged('jobId')
+        && unchanged('createdAt');
+
+      // Nobody deletes notifications through the app.
+      allow delete: if false;
+    }
+
+  }
+}

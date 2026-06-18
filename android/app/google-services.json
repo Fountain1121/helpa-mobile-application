@@ -1,0 +1,46 @@
+{
+  "project_info": {
+    "project_number": "937546130022",
+    "project_id": "helpa-b1891",
+    "storage_bucket": "helpa-b1891.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:937546130022:android:3fed9fc65f4e430a0b03a7",
+        "android_client_info": {
+          "package_name": "com.example.helpa"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "937546130022-hu8o5i7r86gm5f9dogmlrt09j1d83l0q.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAUijYtDWFcMBuB0if7uzHC7Zdir9H8R6Q"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "937546130022-hu8o5i7r86gm5f9dogmlrt09j1d83l0q.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "937546130022-io0r3sfuqnqdblba1d3k2tc9e3vidjh2.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.helpa"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
