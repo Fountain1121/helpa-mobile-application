@@ -193,8 +193,9 @@ class _OverviewTabState extends State<_OverviewTab>
     return StreamBuilder<QuerySnapshot>(
       stream: FirebaseFirestore.instance.collection('jobs').snapshots(),
       builder: (ctx, jobsSnap) {
-        if (jobsSnap.hasError)
+        if (jobsSnap.hasError) {
           return const _StreamError(msg: 'Could not load jobs.');
+        }
         return StreamBuilder<QuerySnapshot>(
           stream: FirebaseFirestore.instance.collection('taskers').snapshots(),
           builder: (ctx, taskersSnap) {
